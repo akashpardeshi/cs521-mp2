@@ -45,8 +45,26 @@ class ConvModel(nn.Module):
         patches = torch.stack(blocks, dim=1)
         return patches
 
+    def tiled_matmul(self, A, B, M, K, N):
+        """Tiled matmul kernel"""
+        C = torch.zeros((M, N), device=A.device)
+        Tsize = 32
+        for ii in range(0, M, Tsize):
+            max_i = min(ii+Tsize, M)
+            for jj in range(0, N, Tsize):
+                max_j = min(jj+Tsize, N)
+                for kk in range(0, K, Tsize):
+                    max_k = min(kk+Tsize, K)
+                    tileA = A[ii:max_i, kk:max_k]
+                    tileB = B[kk:max_k, jj:max_j]
+                    C[ii:max_i, jj:max_j] += torch.matmul(tileA, tileB)
+        return C
+
     def conv2d_manual(self, x):
         N = x.shape[0]
+        C = self.in_channels
+        out_h = self.out_h
+        out_w = self.out_w
         C_out = self.out_channels
         KH = KW = self.kernel_size
 
@@ -58,13 +76,16 @@ class ConvModel(nn.Module):
 
         # 3) perform tiled matmul after required reshaping is done.
         weights = weights.t()
-        out = torch.matmul(cols, weights)
+        m, k, n = self.out_h*self.out_w, C*KH*KW, C_out
+        out = torch.empty((N, m, n), device=x.device)
+        for i in range(N):
+            out[i, :, :] = self.tiled_matmul(cols[i, :, :], weights, m, k, n)
 
         # 4) Add bias.
         out += self.bias
 
         # 5) reshape output into shape (N, C_out, out_h, out_w).
-        out = out.permute(0, 2, 1).contiguous().reshape(N, C_out, self.out_h, self.out_w)
+        out = out.permute(0, 2, 1).reshape(N, C_out, self.out_h, self.out_w)
 
         return out
 
@@ -75,13 +96,21 @@ class ConvModel(nn.Module):
 if __name__ == "__main__":
     torch.manual_seed(0)
     N, C, H, W = 2, 4, 22, 22
-    x = torch.randn(N, C, H, W)
+    x = torch.randn(N, C, H, W).cuda()
     out_channels=8
     kernel_size=7
-    model = ConvModel(H, W, C, out_channels, kernel_size, stride=1, padding=1)
+    model = ConvModel(H, W, C, out_channels, kernel_size, stride=1, padding=1).cuda().eval()
     out = model(x)
 
     # Test your solution
     conv_ref = F.conv2d(x, model.weight, model.bias, stride=1, padding=1)
     print("PyTorch --- shape check:", out.shape == conv_ref.shape)
     print("PyTorch --- correctness check:", torch.allclose(out, conv_ref, atol=1e-4))
+
+    # Profile
+    with profile(activities=[ProfilerActivity.CUDA], record_shapes=True) as prof:
+        with record_function("conv2d_manual"):
+            model(x)
+            pass
+    print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
+    # prof.export_chrome_trace("trace.json")
