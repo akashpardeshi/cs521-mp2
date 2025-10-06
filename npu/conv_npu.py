@@ -64,7 +64,6 @@ def conv2d(X, W, bias):
     )
 
     # Various tiling dimensions
-    X_flat = X.reshape((batch_size, in_channels, input_height * input_width))
     M = out_channels
     TILE_M = 128
 
@@ -75,24 +74,23 @@ def conv2d(X, W, bias):
     TILE_K = 128
 
     # Process the images in batches
-    print(X.shape, W.shape)
     for b in nl.affine_range(batch_size):
         for m in nl.affine_range(M // TILE_M):
+            bias_tile = nl.ndarray((TILE_M, 1), dtype=bias.dtype, buffer=nl.sbuf)
+            bias_tile[...] = nl.load(bias[m * TILE_M:(m + 1) * TILE_M])
             for n in nl.affine_range(N // TILE_N):
+                res_psum = nl.zeros((TILE_M, TILE_N), dtype=nl.float32, buffer=nl.psum)
                 for k in nl.affine_range(K // TILE_K):
                     W_tile = nl.ndarray((TILE_M, TILE_K, filter_height, filter_width), dtype=W.dtype, buffer=nl.sbuf)
-                    X_tile = nl.ndarray((TILE_K, TILE_N), dtype=X.dtype, buffer=nl.sbuf)
-                    bias_tile = nl.ndarray((TILE_M, 1), dtype=bias.dtype, buffer=nl.sbuf)
+                    X_tile = nl.ndarray((TILE_K, filter_height, input_width), dtype=X.dtype, buffer=nl.sbuf)
                     W_tile[...] = nl.load(W[m * TILE_M:(m + 1) * TILE_M, k * TILE_K:(k + 1) * TILE_K, :, :])
-                    X_tile[...] = nl.load(X_flat[b, k * TILE_K:(k + 1) * TILE_K, n * TILE_N:(n + 1) * TILE_N])
-                    bias_tile[...] = nl.load(bias[m * TILE_M:(m + 1) * TILE_M])
+                    X_tile[...] = nl.load(X[b, k * TILE_K:(k + 1) * TILE_K, n:n + filter_height, :])
 
-                    res_psum = nl.zeros((TILE_M, TILE_N), dtype=nl.float32, buffer=nl.psum)
                     for i in nl.affine_range(filter_height):
                         for j in nl.affine_range(filter_width):
-                            res_psum += nl.matmul(W_tile[:, :, i, j], X_tile)
-                    res_sbuf = nl.copy(res_psum, dtype=X_out.dtype)
-                    res_bias = nl.add(res_sbuf, bias_tile)
-                    nl.store(X_out[b, m * TILE_M:(m + 1) * TILE_M, n, :], value=res_bias)
+                            X_block = X_tile[:, i, j:j + out_width]
+                            res_psum += nl.matmul(W_tile[:, :, i, j], X_block)
+                res_sbuf = nl.copy(res_psum, dtype=X_out.dtype)
+                res_bias = nl.add(res_sbuf, bias_tile)
+                nl.store(X_out[b, m * TILE_M:(m + 1) * TILE_M, n, :], value=res_bias)
     return X_out
-
