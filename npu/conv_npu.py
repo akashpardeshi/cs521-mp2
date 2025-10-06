@@ -53,6 +53,7 @@ def conv2d(X, W, bias):
     assert in_channels % 128 == 0
 
     # Can assume one PSUM bank can at least fit one row of the pixels
+    # i.e., out_width <= 512
     assert nl.tile_size.gemm_moving_fmax >= out_width
 
     # Initialize output array
@@ -62,33 +63,36 @@ def conv2d(X, W, bias):
         buffer=nl.hbm,
     )
 
-    # Various tiling dimensions (You may want to define more of them)
-    # c_in_pmax = nl.tile_size.pmax
-    # n_tiles_c_in = in_channels // c_in_pmax
-
+    # Various tiling dimensions
+    X_flat = X.reshape((batch_size, in_channels, input_height * input_width))
     M = out_channels
+    TILE_M = 128
+
     N = out_height * out_width
+    TILE_N = out_width
+
     K = in_channels
+    TILE_K = 128
 
     # Process the images in batches
+    print(X.shape, W.shape)
     for b in nl.affine_range(batch_size):
-        # Allocate tile for matmul results in psum
-        out_tile = nl.zeros(shape=(M, N), dtype=nl.float32, buffer=nl.psum)
-        for i in nl.affine_range(filter_height):
-            for j in nl.affine_range(filter_width):
-                # Allocate tiles for X, W, and matmul output in sbuf
-                W_tile = nl.ndarray(shape=(M, K), dtype=W.dtype, buffer=nl.sbuf)
-                X_tile = nl.ndarray(shape=(K, N), dtype=X.dtype, buffer=nl.sbuf)
+        for m in nl.affine_range(M // TILE_M):
+            for n in nl.affine_range(N // TILE_N):
+                for k in nl.affine_range(K // TILE_K):
+                    W_tile = nl.ndarray((TILE_M, TILE_K, filter_height, filter_width), dtype=W.dtype, buffer=nl.sbuf)
+                    X_tile = nl.ndarray((TILE_K, TILE_N), dtype=X.dtype, buffer=nl.sbuf)
+                    bias_tile = nl.ndarray((TILE_M, 1), dtype=bias.dtype, buffer=nl.sbuf)
+                    W_tile[...] = nl.load(W[m * TILE_M:(m + 1) * TILE_M, k * TILE_K:(k + 1) * TILE_K, :, :])
+                    X_tile[...] = nl.load(X_flat[b, k * TILE_K:(k + 1) * TILE_K, n * TILE_N:(n + 1) * TILE_N])
+                    bias_tile[...] = nl.load(bias[m * TILE_M:(m + 1) * TILE_M])
 
-                # Load tiles
-                W_tile = nl.load(W[:, :, i, j]) # TODO: transpose to (KH, KW, Cout, Cin) would be nice
-                X_tile = nl.load(X[b, :, i:i+out_height, j:j+out_width])
-
-                # Matmul
-                out_tile += nl.matmul(W_tile, X_tile)
-
-        # Copy out and store
-        res = nl.copy(out_tile, dtype=X_out.dtype)
-        nl.store(X_out[b, :, :, :], value=res)
+                    res_psum = nl.zeros((TILE_M, TILE_N), dtype=nl.float32, buffer=nl.psum)
+                    for i in nl.affine_range(filter_height):
+                        for j in nl.affine_range(filter_width):
+                            res_psum += nl.matmul(W_tile[:, :, i, j], X_tile)
+                    res_sbuf = nl.copy(res_psum, dtype=X_out.dtype)
+                    res_bias = nl.add(res_sbuf, bias_tile)
+                    nl.store(X_out[b, m * TILE_M:(m + 1) * TILE_M, n, :], value=res_bias)
     return X_out
 
