@@ -63,13 +63,32 @@ def conv2d(X, W, bias):
     )
 
     # Various tiling dimensions (You may want to define more of them)
-    c_in_pmax = nl.tile_size.pmax
-    n_tiles_c_in = in_channels // c_in_pmax
+    # c_in_pmax = nl.tile_size.pmax
+    # n_tiles_c_in = in_channels // c_in_pmax
+
+    M = out_channels
+    N = out_height * out_width
+    K = in_channels
 
     # Process the images in batches
     for b in nl.affine_range(batch_size):
-        raise RuntimeError("Please fill your implementation of computing convolution"
-                           " of X[b] with the weights W and bias b and store the result in X_out[b]")
+        # Allocate tile for matmul results in psum
+        out_tile = nl.zeros(shape=(M, N), dtype=nl.float32, buffer=nl.psum)
+        for i in nl.affine_range(filter_height):
+            for j in nl.affine_range(filter_width):
+                # Allocate tiles for X, W, and matmul output in sbuf
+                W_tile = nl.ndarray(shape=(M, K), dtype=W.dtype, buffer=nl.sbuf)
+                X_tile = nl.ndarray(shape=(K, N), dtype=X.dtype, buffer=nl.sbuf)
 
+                # Load tiles
+                W_tile = nl.load(W[:, :, i, j]) # TODO: transpose to (KH, KW, Cout, Cin) would be nice
+                X_tile = nl.load(X[b, :, i:i+out_height, j:j+out_width])
+
+                # Matmul
+                out_tile += nl.matmul(W_tile, X_tile)
+
+        # Copy out and store
+        res = nl.copy(out_tile, dtype=X_out.dtype)
+        nl.store(X_out[b, :, :, :], value=res)
     return X_out
 
