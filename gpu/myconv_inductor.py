@@ -6,17 +6,21 @@ from myconv import ConvModel
 
 if __name__ == "__main__":
     torch.manual_seed(0)
-
     # Instantiate your PyTorch model
-    N, C, H, W = 2, 3, 19, 19
+    N, C, H, W = 2, 8, 16, 16
     x = torch.randn(N, C, H, W).cuda()
-    
-    model = ConvModel(H, W, in_channels=3, out_channels=8, kernel_size=3, stride=1, padding=1).cuda().eval()
+    model = ConvModel(H, W, C, out_channels=32, kernel_size=5, stride=1, padding=1).cuda().eval()
 
-    # Torch-Inductor compilation
-    scripted_model = torch.compile(model, backend="inductor")
-    out = scripted_model(x)
-    
+    # Profile
+    with profile(activities=[ProfilerActivity.CPU], record_shapes=True) as prof:
+        # Torch-Inductor compilation
+        scripted_model = torch.compile(model, backend="inductor")
+
+        # the first execution is warm up, the next should be steady-state
+        for i in range(5):
+            out = scripted_model(x)
+    prof.export_chrome_trace("inductor_trace.json")
+
     # Test your solution
     conv_ref = F.conv2d(x, model.weight, model.bias, stride=1, padding=1)
     print("Inductor --- shape check:", out.shape == conv_ref.shape)

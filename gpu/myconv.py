@@ -95,22 +95,15 @@ class ConvModel(nn.Module):
 
 if __name__ == "__main__":
     torch.manual_seed(0)
-    N, C, H, W = 2, 4, 22, 22
+    N, C, H, W = 2, 8, 16, 16
     x = torch.randn(N, C, H, W).cuda()
-    out_channels=8
-    kernel_size=7
-    model = ConvModel(H, W, C, out_channels, kernel_size, stride=1, padding=1).cuda().eval()
-    out = model(x)
+    model = ConvModel(H, W, C, out_channels=32, kernel_size=5, stride=1, padding=1).cuda().eval()
+    # Profile
+    with profile(activities=[ProfilerActivity.CUDA], record_shapes=True) as prof:
+        out = model(x)
+    prof.export_chrome_trace("pytorch_trace.json")
 
     # Test your solution
     conv_ref = F.conv2d(x, model.weight, model.bias, stride=1, padding=1)
     print("PyTorch --- shape check:", out.shape == conv_ref.shape)
     print("PyTorch --- correctness check:", torch.allclose(out, conv_ref, atol=1e-4))
-
-    # Profile
-    with profile(activities=[ProfilerActivity.CUDA], record_shapes=True) as prof:
-        with record_function("conv2d_manual"):
-            model(x)
-            pass
-    print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
-    # prof.export_chrome_trace("trace.json")

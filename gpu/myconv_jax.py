@@ -83,12 +83,10 @@ def conv2d_manual_jax(x, weight, bias, stride=1, padding=1):
 
 if __name__ == "__main__":
     # Instantiate PyTorch model
-    H, W = 33, 33
-    model = ConvModel(H, W, in_channels=3, out_channels=8, kernel_size=5, stride=1, padding=1)
+    N, C, H, W = 2, 8, 16, 16
+    x_torch = torch.randn(N, C, H, W)
+    model = ConvModel(H, W, C, out_channels=32, kernel_size=5, stride=1, padding=1)
     model.eval()
-
-    # Example input
-    x_torch = torch.randn(1, 3, H, W)
 
     # Export weights and biases
     params = {
@@ -101,13 +99,16 @@ if __name__ == "__main__":
     weight_jax = jnp.array(params["weight"])
     bias_jax = jnp.array(params["bias"])
 
-    # enable JIT compilation
-    conv2d_manual_jax_jit = jit(conv2d_manual_jax)
+    with jax.profiler.trace(log_dir=logdir):
+        # enable JIT compilation
+        conv2d_manual_jax_jit = jit(conv2d_manual_jax)
+        lowered = conv2d_manual_jax_jit.lower(x_jax, weight_jax, bias_jax)
+        compiled = lowered.compile()
 
-    # call your JAX function
-    # jax.profiler.start_trace(log_dir=logdir)
-    out_jax = conv2d_manual_jax_jit(x_jax, weight_jax, bias_jax)
-    # jax.profiler.stop_trace()
+        # the first execution is warm up, the next should be steady-state
+        for i in range(5):
+            # call your JAX function
+            out_jax = compiled(x_jax, weight_jax, bias_jax)
 
     # Test your solution
     conv_ref = F.conv2d(x_torch, model.weight, model.bias, stride=1, padding=1)
